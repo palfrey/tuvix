@@ -1,11 +1,14 @@
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
+use starlark::collections::SmallMap;
 use starlark::environment::{Globals, GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::syntax::{AstModule, Dialect};
+use starlark::values::dict::Dict;
 use starlark::values::none::NoneType;
-use starlark::values::AnyLifetime;
+use starlark::values::structs::StructBuilder;
+use starlark::values::{AllocValue, AnyLifetime};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Command;
@@ -107,7 +110,7 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
 }
 
 pub fn build_module(filename: &str) -> Result<()> {
-    println!("Building {}", filename);
+    println!("Configuring {}", filename);
     // We first parse the content, giving a filename and the Starlark
     // `Dialect` we'd like to use (we pick standard).
 
@@ -120,12 +123,18 @@ pub fn build_module(filename: &str) -> Result<()> {
     let root_dir = Path::new("/home/palfrey/src/tuvix/");
     let store_dir = root_dir.join("store");
     let hash_dir = store_dir.join(base16ct::lower::encode_string(&hash));
+    let complete_file = hash_dir.join(".complete");
+
+    if complete_file.exists() {
+        println!("{} is already built in {:?}", filename, &hash_dir);
+        return Ok(());
+    }
 
     let ast: AstModule = AstModule::parse(filename, content.to_owned(), &Dialect::Extended)?;
 
     // We create a `Globals`, defining the standard library functions available.
     // The `standard` function uses those defined in the Starlark specification.
-    let globals: Globals = GlobalsBuilder::new().with(starlark_helpers).build();
+    let globals: Globals = GlobalsBuilder::extended().with(starlark_helpers).build();
 
     // We create a `Module`, which stores the global variables for our calculation.
     let module: Module = Module::new();
@@ -138,16 +147,28 @@ pub fn build_module(filename: &str) -> Result<()> {
     eval.extra = Some(&info);
 
     fs::create_dir_all(&hash_dir)?;
-    std::env::set_current_dir(hash_dir)?;
+    std::env::set_current_dir(&hash_dir)?;
 
     // And finally we evaluate the code using the evaluator.
     eval.eval_module(ast, &globals)?;
     let build_fn = module.get("build").context("Can't find build function")?;
-    let res = eval.eval_function(build_fn, &[], &[])?;
+    println!("Building {} in {:?}", filename, &hash_dir);
+
+    let heap = eval.heap();
+    let mut paths_map = SmallMap::new();
+    paths_map.insert_hashed(heap.alloc_str("ncurses").get_hashed()?, heap.alloc("foo"));
+    let paths = Dict::new(paths_map);
+    let mut sb = StructBuilder::new(heap);
+    sb.add("paths", paths);
+    let build_context = sb.build().alloc_value(heap);
+
+    let res = eval.eval_function(build_fn, &[build_context], &[])?;
     if res.is_none() {
         println!("Build complete for {}", filename);
     } else {
         println!("Build result for {}: {:?}", filename, res.unpack_str());
     }
+    fs::write(complete_file, "").unwrap();
+
     Ok(())
 }
