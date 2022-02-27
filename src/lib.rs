@@ -36,7 +36,6 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
         if Path::new(fname).exists() {
             let contents = fs::read(fname)?;
             if check_hash_for_bytes(&contents, sha256_hash).is_ok() {
-                println!("fname: {fname}");
                 return Ok(fname.to_string());
             }
         }
@@ -46,7 +45,6 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
         }
 
         fs::write(fname, body).unwrap();
-        println!("fname: {fname}");
         Ok(fname.to_string())
     }
 
@@ -86,7 +84,6 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
             bail!("{} is not a subfolder of {}", folder, info.hash_path);
         }
         env::set_current_dir(folder)?;
-        println!("Cd to {}", folder);
         Ok(NoneType)
     }
 
@@ -110,6 +107,7 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
 }
 
 pub fn build_module(filename: &str) -> Result<()> {
+    println!("Building {}", filename);
     // We first parse the content, giving a filename and the Starlark
     // `Dialect` we'd like to use (we pick standard).
 
@@ -146,6 +144,10 @@ pub fn build_module(filename: &str) -> Result<()> {
     eval.eval_module(ast, &globals)?;
     let build_fn = module.get("build").context("Can't find build function")?;
     let res = eval.eval_function(build_fn, &[], &[])?;
-    println!("{:?}", res.unpack_str());
+    if res.is_none() {
+        println!("Build complete for {}", filename);
+    } else {
+        println!("Build result for {}: {:?}", filename, res.unpack_str());
+    }
     Ok(())
 }
