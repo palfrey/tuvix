@@ -6,5 +6,3 @@ def build():
     run("./configure --prefix=%s --without-tcsetpgrp" % current_folder)
     run("make -j")
     run("make install")
-    
-build

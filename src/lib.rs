@@ -143,7 +143,8 @@ pub fn build_module(filename: &str) -> Result<()> {
     std::env::set_current_dir(hash_dir)?;
 
     // And finally we evaluate the code using the evaluator.
-    let build_fn = eval.eval_module(ast, &globals)?;
+    eval.eval_module(ast, &globals)?;
+    let build_fn = module.get("build").context("Can't find build function")?;
     let res = eval.eval_function(build_fn, &[], &[])?;
     println!("{:?}", res.unpack_str());
     Ok(())
