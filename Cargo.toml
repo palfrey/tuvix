@@ -1,0 +1,8 @@
+[package]
+name = "tuvix"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+starlark = "0.6.0"
+anyhow = "1"
