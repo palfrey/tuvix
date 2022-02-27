@@ -1,1 +1,2 @@
 nightly-2022-02-26
+fakechroot
