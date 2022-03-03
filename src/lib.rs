@@ -1,4 +1,6 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use libmount::BindMount;
+use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 use starlark::collections::SmallMap;
 use starlark::environment::{Globals, GlobalsBuilder, Module};
@@ -9,14 +11,17 @@ use starlark::values::dict::Dict;
 use starlark::values::none::NoneType;
 use starlark::values::structs::StructBuilder;
 use starlark::values::{AllocValue, AnyLifetime};
-use std::collections::VecDeque;
-use std::path::Path;
+use std::fs::File;
+use std::os::unix::fs as unix_fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
+use tar::Archive;
+use xz2::read::XzDecoder;
 
 #[derive(AnyLifetime)]
 struct Info {
-    pub hash_path: String,
+    pub http_client: Client,
 }
 
 fn check_hash_for_bytes(contents: &[u8], expected_hash: &str) -> Result<(), String> {
@@ -42,7 +47,8 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
                 return Ok(fname.to_string());
             }
         }
-        let body = reqwest::blocking::get(url).unwrap().bytes()?;
+        let info = eval.extra.unwrap().downcast_ref::<Info>().unwrap();
+        let body = info.http_client.get(url).send()?.bytes()?;
         if let Err(encoded_hash) = check_hash_for_bytes(&body, sha256_hash) {
             bail!("{encoded_hash} != {sha256_hash} for {url}")
         }
@@ -56,24 +62,12 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
         let mut absolute_path = std::env::current_dir()?;
         absolute_path.push(path);
         let pathed = path.file_stem().unwrap().to_str().unwrap();
-        let info = eval.extra.unwrap().downcast_ref::<Info>().unwrap();
-        let folder = Path::new(&info.hash_path).join(pathed);
+        let folder = Path::new("/").join(&pathed);
         fs::create_dir_all(&folder)?;
-        let current_dir = env::current_dir().context("can't get current dir!")?;
-        env::set_current_dir(&folder).context(format!("can't set current dir to {:?}", folder))?;
-        let output = Command::new("tar")
-            .arg("-Jxvf")
-            .arg(absolute_path.to_str().unwrap())
-            .output()
-            .context("from command")?;
-        if output.status.code() != Some(0) {
-            bail!(
-                "Failed to run tar: {}, {}",
-                std::str::from_utf8(&output.stdout)?,
-                std::str::from_utf8(&output.stderr)?
-            );
-        }
-        env::set_current_dir(current_dir)?;
+        let compressed_file = File::open(path)?;
+        let decompressor = XzDecoder::new(compressed_file);
+        let mut archive = Archive::new(decompressor);
+        archive.unpack(&folder)?;
         Ok(folder.to_str().unwrap().to_string())
     }
 
@@ -82,21 +76,19 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
     }
 
     fn chdir(folder: &str) -> NoneType {
-        let info = eval.extra.unwrap().downcast_ref::<Info>().unwrap();
-        if !folder.starts_with(&info.hash_path) {
-            bail!("{} is not a subfolder of {}", folder, info.hash_path);
-        }
+        print!("CD to {folder}");
         env::set_current_dir(folder)?;
         Ok(NoneType)
     }
 
     fn run(command: &str) -> i32 {
-        let mut bits: VecDeque<_> = command.split(" ").collect();
-        let program = bits.pop_front().unwrap();
+        let bits: Vec<_> = command.split(" ").collect();
+        let program = "/.bin/strace";
         let output = Command::new(program)
-            .args(bits)
+            .args(&bits)
+            .env_clear()
             .output()
-            .context(format!("from command for {}", program))?;
+            .context(format!("from command for {} {:?}", program, &bits))?;
         if output.status.code() != Some(0) {
             bail!(
                 "Failed to run {}: {}, {}",
@@ -109,20 +101,56 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
     }
 }
 
-pub fn build_module(filename: &str) -> Result<()> {
-    println!("Configuring {}", filename);
-    // We first parse the content, giving a filename and the Starlark
-    // `Dialect` we'd like to use (we pick standard).
-
+fn hash_file(filename: &str) -> Result<(String, String)> {
     let content =
         fs::read_to_string(filename).context(format!("Error while loading '{filename}'"))?;
     let mut hasher = Sha256::new();
     hasher.update(&content);
     let hash = hasher.finalize();
+    Ok((content, base16ct::lower::encode_string(&hash)))
+}
 
-    let root_dir = Path::new("/home/palfrey/src/tuvix/");
-    let store_dir = root_dir.join("store");
-    let hash_dir = store_dir.join(base16ct::lower::encode_string(&hash));
+fn root_dir() -> PathBuf {
+    PathBuf::from("/home/palfrey/src/tuvix/")
+}
+
+fn make_if_not_exists(folder: &PathBuf) -> Result<()> {
+    if !folder.exists() {
+        fs::create_dir(&folder).context(format!("making {:?}", folder))?;
+    }
+    Ok(())
+}
+
+fn setup_hashdir(hash_dir: &PathBuf) -> Result<()> {
+    let bin_path = hash_dir.join("bin");
+    make_if_not_exists(&bin_path)?;
+    fs::copy(root_dir().join("helpers/bash"), bin_path.join("sh")).context("copying bash")?;
+
+    let hidden_bin_path = hash_dir.join(".bin");
+    make_if_not_exists(&hidden_bin_path)?;
+    fs::copy(
+        root_dir().join("helpers/strace"),
+        hidden_bin_path.join("strace"),
+    )
+    .context("copying strace")?;
+
+    let dev_path = hash_dir.join("dev");
+    make_if_not_exists(&dev_path)?;
+    if !dev_path.join("null").exists() {
+        let dev_mount = BindMount::new("/dev", dev_path);
+        dev_mount.mount().map_err(|err| anyhow!("{}", err))?;
+    }
+
+    Ok(())
+}
+
+pub fn build_module(filename: &str) -> Result<()> {
+    println!("Configuring {}", filename);
+
+    let (content, hash) = hash_file(filename)?;
+
+    let store_dir = root_dir().join("store");
+    let hash_dir = store_dir.join(hash);
     let complete_file = hash_dir.join(".complete");
 
     if complete_file.exists() {
@@ -142,7 +170,7 @@ pub fn build_module(filename: &str) -> Result<()> {
     // We create an evaluator, which controls how evaluation occurs.
     let mut eval: Evaluator = Evaluator::new(&module);
     let info = Info {
-        hash_path: hash_dir.to_str().unwrap().to_string(),
+        http_client: Client::new(),
     };
     eval.extra = Some(&info);
 
@@ -161,6 +189,9 @@ pub fn build_module(filename: &str) -> Result<()> {
     let mut sb = StructBuilder::new(heap);
     sb.add("paths", paths);
     let build_context = sb.build().alloc_value(heap);
+
+    setup_hashdir(&hash_dir)?;
+    unix_fs::chroot(&hash_dir).context("can't chroot")?;
 
     let res = eval.eval_function(build_fn, &[build_context], &[])?;
     if res.is_none() {
