@@ -113,6 +113,27 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
 
         Ok(0)
     }
+
+    fn get_output() -> String {
+        Ok(eval
+            .extra
+            .unwrap()
+            .downcast_ref::<Info>()
+            .unwrap()
+            .hash_dir
+            .join("output")
+            .to_str()
+            .unwrap()
+            .to_string())
+    }
+
+    fn joinpath(first: &str, second: &str) -> String {
+        Ok(Path::new(first).join(second).to_str().unwrap().to_string())
+    }
+
+    fn r#move(source: &str, dest: &str) -> NoneType {
+        Ok(NoneType)
+    }
 }
 
 fn hash_file(filename: &str) -> Result<(String, String)> {
@@ -138,7 +159,6 @@ fn make_if_not_exists(folder: &PathBuf) -> Result<()> {
 fn setup_hashdir(hash_dir: &PathBuf) -> Result<()> {
     let bin_path = hash_dir.join("bin");
     make_if_not_exists(&bin_path)?;
-    fs::copy(root_dir().join("helpers/bash"), bin_path.join("sh")).context("copying bash")?;
 
     let hidden_bin_path = hash_dir.join(".bin");
     make_if_not_exists(&hidden_bin_path)?;
@@ -169,6 +189,11 @@ fn setup_hashdir(hash_dir: &PathBuf) -> Result<()> {
 
 pub fn build_module(filename: &str) -> Result<()> {
     println!("Configuring {}", filename);
+    let module_dir = Path::new(&filename)
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
 
     let (content, hash) = hash_file(filename)?;
 
@@ -203,10 +228,22 @@ pub fn build_module(filename: &str) -> Result<()> {
 
     // And finally we evaluate the code using the evaluator.
     eval.eval_module(ast, &globals)?;
+
+    let heap = eval.heap();
+
+    let dependencies = module
+        .get("dependencies")
+        .unwrap_or_else(|| heap.alloc_list(&[]));
+
+    for dep in dependencies.iterate(heap).unwrap() {
+        let dep_path = module_dir.join(format!("{}.star", dep.unpack_str().unwrap()));
+        println!("Loading {:?}", dep_path);
+        build_module(dep_path.to_str().unwrap()).unwrap();
+    }
+
     let build_fn = module.get("build").context("Can't find build function")?;
     println!("Building {} in {:?}", filename, &hash_dir);
 
-    let heap = eval.heap();
     let mut paths_map = SmallMap::new();
     paths_map.insert_hashed(heap.alloc_str("ncurses").get_hashed()?, heap.alloc("foo"));
     let paths = Dict::new(paths_map);
@@ -223,7 +260,7 @@ pub fn build_module(filename: &str) -> Result<()> {
     } else {
         println!("Build result for {}: {:?}", filename, res.unpack_str());
     }
-    fs::write(complete_file, "").unwrap();
+    fs::write(&complete_file, "").context(format!("issues while writing {:?}", &complete_file))?;
 
     Ok(())
 }
