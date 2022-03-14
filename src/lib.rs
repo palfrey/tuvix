@@ -1,5 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
-use libmount::BindMount;
+use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 use starlark::collections::SmallMap;
@@ -41,21 +40,29 @@ fn check_hash_for_bytes(contents: &[u8], expected_hash: &str) -> Result<(), Stri
 #[starlark_module]
 fn starlark_helpers(builder: &mut GlobalsBuilder) {
     fn download(url: &str, sha256_hash: &str) -> String {
-        let checked_url = url::Url::parse(url).unwrap();
-        let fname = checked_url.path_segments().unwrap().last().unwrap();
+        let checked_url = url::Url::parse(url).expect("url");
+        let fname = checked_url
+            .path_segments()
+            .expect("segments")
+            .last()
+            .expect("has last");
         if Path::new(fname).exists() {
             let contents = fs::read(fname)?;
             if check_hash_for_bytes(&contents, sha256_hash).is_ok() {
                 return Ok(fname.to_string());
             }
         }
-        let info = eval.extra.unwrap().downcast_ref::<Info>().unwrap();
+        let info = eval
+            .extra
+            .expect("has extra")
+            .downcast_ref::<Info>()
+            .expect("is info");
         let body = info.http_client.get(url).send()?.bytes()?;
         if let Err(encoded_hash) = check_hash_for_bytes(&body, sha256_hash) {
             bail!("{encoded_hash} != {sha256_hash} for {url}")
         }
 
-        fs::write(fname, body).unwrap();
+        fs::write(fname, body).expect(&format!("can dump to {}", fname));
         Ok(fname.to_string())
     }
 
@@ -149,118 +156,144 @@ fn root_dir() -> PathBuf {
     PathBuf::from("/home/palfrey/src/tuvix/")
 }
 
-fn make_if_not_exists(folder: &PathBuf) -> Result<()> {
-    if !folder.exists() {
-        fs::create_dir(&folder).context(format!("making {:?}", folder))?;
-    }
-    Ok(())
+pub struct Builder {
+    filename: String,
+    content: String,
+    hash_dir: PathBuf,
+    module_dir: PathBuf,
 }
 
-fn setup_hashdir(hash_dir: &PathBuf) -> Result<()> {
-    let bin_path = hash_dir.join("bin");
-    make_if_not_exists(&bin_path)?;
+impl Builder {
+    pub fn new(filename: &str) -> Result<Builder> {
+        println!("Configuring {}", filename);
+        let module_dir = Path::new(&filename)
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
 
-    let hidden_bin_path = hash_dir.join(".bin");
-    make_if_not_exists(&hidden_bin_path)?;
-    fs::copy(
-        root_dir().join("helpers/strace"),
-        hidden_bin_path.join("strace"),
-    )
-    .context("copying strace")?;
+        let (content, hash) = hash_file(filename)?;
 
-    let dev_path = hash_dir.join("dev");
-    make_if_not_exists(&dev_path)?;
-    if !dev_path.join("null").exists() {
-        let dev_mount = BindMount::new("/dev", dev_path);
-        dev_mount.mount().map_err(|err| anyhow!("{}", err))?;
-    }
-    let proc_path = hash_dir.join("proc");
-    make_if_not_exists(&proc_path)?;
-    if !proc_path.join("version").exists() {
-        let proc_mount = BindMount::new("/proc", proc_path);
-        proc_mount.mount().map_err(|err| anyhow!("{}", err))?;
+        let store_dir = root_dir().join("store");
+        let hash_dir = store_dir.join(hash);
+
+        Ok(Builder {
+            filename: filename.to_string(),
+            content,
+            hash_dir,
+            module_dir,
+        })
     }
 
-    let tmp_path = hash_dir.join("tmp");
-    make_if_not_exists(&tmp_path)?;
+    pub fn build_in_chroot(self) -> Result<()> {
+        let ast: AstModule =
+            AstModule::parse(&self.filename, self.content.to_owned(), &Dialect::Extended)?;
 
-    Ok(())
-}
+        // We create a `Globals`, defining the standard library functions available.
+        // The `standard` function uses those defined in the Starlark specification.
+        let globals: Globals = GlobalsBuilder::extended().with(starlark_helpers).build();
 
-pub fn build_module(filename: &str) -> Result<()> {
-    println!("Configuring {}", filename);
-    let module_dir = Path::new(&filename)
-        .parent()
-        .unwrap()
-        .canonicalize()
-        .unwrap();
+        // We create a `Module`, which stores the global variables for our calculation.
+        let module: Module = Module::new();
 
-    let (content, hash) = hash_file(filename)?;
+        // We create an evaluator, which controls how evaluation occurs.
+        let mut eval: Evaluator = Evaluator::new(&module);
+        let info = Info {
+            http_client: Client::new(),
+            hash_dir: self.hash_dir.clone(),
+        };
+        eval.extra = Some(&info);
 
-    let store_dir = root_dir().join("store");
-    let hash_dir = store_dir.join(hash);
-    let complete_file = hash_dir.join(".complete");
+        // And finally we evaluate the code using the evaluator.
+        eval.eval_module(ast, &globals)?;
 
-    if complete_file.exists() {
-        println!("{} is already built in {:?}", filename, &hash_dir);
-        return Ok(());
+        let build_fn = module.get("build").context("Can't find build function")?;
+        println!("Building {} in {:?}", self.filename, &self.hash_dir);
+
+        let heap = eval.heap();
+
+        let mut paths_map = SmallMap::new();
+        paths_map.insert_hashed(heap.alloc_str("ncurses").get_hashed()?, heap.alloc("foo"));
+        let paths = Dict::new(paths_map);
+        let mut sb = StructBuilder::new(heap);
+        sb.add("paths", paths);
+        let build_context = sb.build().alloc_value(heap);
+
+        unix_fs::chroot(&self.hash_dir).context("can't chroot")?;
+        env::set_current_dir("/")?;
+        let res = eval.eval_function(build_fn, &[build_context], &[])?;
+        if res.is_none() {
+            println!("Build complete for {}", self.filename);
+        } else {
+            println!("Build result for {}: {:?}", self.filename, res.unpack_str());
+        }
+        Ok(())
     }
 
-    let ast: AstModule = AstModule::parse(filename, content.to_owned(), &Dialect::Extended)?;
+    pub fn build_module(self) -> Result<()> {
+        let complete_file = self.hash_dir.join(".complete");
 
-    // We create a `Globals`, defining the standard library functions available.
-    // The `standard` function uses those defined in the Starlark specification.
-    let globals: Globals = GlobalsBuilder::extended().with(starlark_helpers).build();
+        if complete_file.exists() {
+            println!("{} is already built in {:?}", self.filename, &self.hash_dir);
+            return Ok(());
+        }
 
-    // We create a `Module`, which stores the global variables for our calculation.
-    let module: Module = Module::new();
+        let ast: AstModule =
+            AstModule::parse(&self.filename, self.content.to_owned(), &Dialect::Extended)?;
 
-    // We create an evaluator, which controls how evaluation occurs.
-    let mut eval: Evaluator = Evaluator::new(&module);
-    let info = Info {
-        http_client: Client::new(),
-        hash_dir: hash_dir.clone(),
-    };
-    eval.extra = Some(&info);
+        // We create a `Globals`, defining the standard library functions available.
+        // The `standard` function uses those defined in the Starlark specification.
+        let globals: Globals = GlobalsBuilder::extended().with(starlark_helpers).build();
 
-    fs::create_dir_all(&hash_dir)?;
-    std::env::set_current_dir(&hash_dir)?;
+        // We create a `Module`, which stores the global variables for our calculation.
+        let module: Module = Module::new();
 
-    // And finally we evaluate the code using the evaluator.
-    eval.eval_module(ast, &globals)?;
+        // We create an evaluator, which controls how evaluation occurs.
+        let mut eval: Evaluator = Evaluator::new(&module);
+        let info = Info {
+            http_client: Client::new(),
+            hash_dir: self.hash_dir.clone(),
+        };
+        eval.extra = Some(&info);
 
-    let heap = eval.heap();
+        // And finally we evaluate the code using the evaluator.
+        eval.eval_module(ast, &globals)?;
 
-    let dependencies = module
-        .get("dependencies")
-        .unwrap_or_else(|| heap.alloc_list(&[]));
+        fs::create_dir_all(&self.hash_dir)?;
 
-    for dep in dependencies.iterate(heap).unwrap() {
-        let dep_path = module_dir.join(format!("{}.star", dep.unpack_str().unwrap()));
-        println!("Loading {:?}", dep_path);
-        build_module(dep_path.to_str().unwrap()).unwrap();
+        let heap = eval.heap();
+
+        let dependencies = module
+            .get("dependencies")
+            .unwrap_or_else(|| heap.alloc_list(&[]));
+
+        for dep in dependencies.iterate(heap).unwrap() {
+            let dep_path = self
+                .module_dir
+                .join(format!("{}.star", dep.unpack_str().unwrap()));
+            println!("Loading {:?}", dep_path);
+            Builder::new(dep_path.to_str().unwrap())?.build_module()?;
+        }
+
+        let chroot_builder_path = "target/debug/build_in_chroot";
+
+        let output = Command::new(chroot_builder_path)
+            .arg(self.filename)
+            .env_clear()
+            .output()
+            .expect("launch build_in_chroot");
+        if output.status.code() != Some(0) {
+            bail!(
+                "Failed to run {}: '{}' '{}'",
+                chroot_builder_path,
+                std::str::from_utf8(&output.stdout).unwrap(),
+                std::str::from_utf8(&output.stderr).unwrap()
+            );
+        }
+        let complete_file = self.hash_dir.join(".complete");
+        fs::write(&complete_file, "")
+            .context(format!("issues while writing {:?}", &complete_file))?;
+
+        Ok(())
     }
-
-    let build_fn = module.get("build").context("Can't find build function")?;
-    println!("Building {} in {:?}", filename, &hash_dir);
-
-    let mut paths_map = SmallMap::new();
-    paths_map.insert_hashed(heap.alloc_str("ncurses").get_hashed()?, heap.alloc("foo"));
-    let paths = Dict::new(paths_map);
-    let mut sb = StructBuilder::new(heap);
-    sb.add("paths", paths);
-    let build_context = sb.build().alloc_value(heap);
-
-    setup_hashdir(&hash_dir)?;
-    unix_fs::chroot(&hash_dir).context("can't chroot")?;
-
-    let res = eval.eval_function(build_fn, &[build_context], &[])?;
-    if res.is_none() {
-        println!("Build complete for {}", filename);
-    } else {
-        println!("Build result for {}: {:?}", filename, res.unpack_str());
-    }
-    fs::write(&complete_file, "").context(format!("issues while writing {:?}", &complete_file))?;
-
-    Ok(())
 }

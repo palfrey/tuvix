@@ -1,11 +1,11 @@
 use std::path::Path;
 
-use tuvix::build_module;
+use tuvix::Builder;
 
 #[test]
 fn build_zsh() {
     let test_path = Path::new(file!());
-    build_module(
+    Builder::new(
         test_path
             .parent()
             .unwrap()
@@ -13,5 +13,7 @@ fn build_zsh() {
             .to_str()
             .unwrap(),
     )
+    .unwrap()
+    .build_module()
     .unwrap();
 }
