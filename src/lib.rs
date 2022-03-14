@@ -122,16 +122,7 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
     }
 
     fn get_output() -> String {
-        Ok(eval
-            .extra
-            .unwrap()
-            .downcast_ref::<Info>()
-            .unwrap()
-            .hash_dir
-            .join("output")
-            .to_str()
-            .unwrap()
-            .to_string())
+        Ok("/output".to_string())
     }
 
     fn joinpath(first: &str, second: &str) -> String {
@@ -139,6 +130,12 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
     }
 
     fn r#move(source: &str, dest: &str) -> NoneType {
+        fs::rename(source, dest).expect(&format!("Move {source} to {dest}"));
+        Ok(NoneType)
+    }
+
+    fn mkdir(path: &str) -> NoneType {
+        fs::create_dir(path).expect(&format!("Making directory {path}"));
         Ok(NoneType)
     }
 }
@@ -161,6 +158,13 @@ pub struct Builder {
     content: String,
     hash_dir: PathBuf,
     module_dir: PathBuf,
+}
+
+fn make_if_not_exists(folder: &PathBuf) -> Result<()> {
+    if !folder.exists() {
+        fs::create_dir(&folder).context(format!("making {:?}", folder))?;
+    }
+    Ok(())
 }
 
 impl Builder {
@@ -221,6 +225,7 @@ impl Builder {
 
         unix_fs::chroot(&self.hash_dir).context("can't chroot")?;
         env::set_current_dir("/")?;
+        make_if_not_exists(&PathBuf::from("/output"))?;
         let res = eval.eval_function(build_fn, &[build_context], &[])?;
         if res.is_none() {
             println!("Build complete for {}", self.filename);
@@ -278,7 +283,7 @@ impl Builder {
         let chroot_builder_path = "target/debug/build_in_chroot";
 
         let output = Command::new(chroot_builder_path)
-            .arg(self.filename)
+            .arg(&self.filename)
             .env_clear()
             .output()
             .expect("launch build_in_chroot");
@@ -290,6 +295,12 @@ impl Builder {
                 std::str::from_utf8(&output.stderr).unwrap()
             );
         }
+        println!(
+            "Ran {}: '{}' '{}'",
+            self.filename,
+            std::str::from_utf8(&output.stdout).unwrap(),
+            std::str::from_utf8(&output.stderr).unwrap()
+        );
         let complete_file = self.hash_dir.join(".complete");
         fs::write(&complete_file, "")
             .context(format!("issues while writing {:?}", &complete_file))?;

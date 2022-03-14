@@ -5,5 +5,6 @@ def build(context):
     )
     output_folder = get_output()
     bin_folder = joinpath(output_folder, "bin")
+    mkdir(bin_folder)
     sh_path = joinpath(bin_folder, "sh")
     move(path, sh_path)
