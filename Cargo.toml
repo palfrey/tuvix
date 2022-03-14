@@ -13,4 +13,3 @@ url = "2"
 gazebo = "^0.4" # for Starlark integration
 xz2 = "0.1"
 tar = "0.4"
-libmount = "0.1.15"
