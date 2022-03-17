@@ -40,7 +40,7 @@ fn check_hash_for_bytes(contents: &[u8], expected_hash: &str) -> Result<(), Stri
 #[starlark_module]
 fn starlark_helpers(builder: &mut GlobalsBuilder) {
     fn download(url: &str, sha256_hash: &str) -> String {
-        let checked_url = url::Url::parse(url).expect("url");
+        let checked_url = url::Url::parse(url).expect(&format!("failure parsing '{}' as url", url));
         let fname = checked_url
             .path_segments()
             .expect("segments")
@@ -296,6 +296,7 @@ impl Builder {
                 .to_string(),
         ];
         mount_args.append(&mut dep_outputs);
+        println!("Mounting: {}", mount_args.join(" "));
         let mount_output = Command::new("sudo")
             .args(&mount_args)
             .output()
