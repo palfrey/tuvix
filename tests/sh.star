@@ -8,3 +8,4 @@ def build(context):
     mkdir(bin_folder)
     sh_path = joinpath(bin_folder, "sh")
     move(path, sh_path)
+    make_executable(sh_path)

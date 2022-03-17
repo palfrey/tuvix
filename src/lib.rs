@@ -11,8 +11,9 @@ use starlark::values::none::NoneType;
 use starlark::values::structs::StructBuilder;
 use starlark::values::{AllocValue, AnyLifetime};
 use std::collections::VecDeque;
-use std::fs::File;
+use std::fs::{File, Permissions};
 use std::os::unix::fs as unix_fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
@@ -22,7 +23,6 @@ use xz2::read::XzDecoder;
 #[derive(AnyLifetime)]
 struct Info {
     pub http_client: Client,
-    pub hash_dir: PathBuf,
 }
 
 fn check_hash_for_bytes(contents: &[u8], expected_hash: &str) -> Result<(), String> {
@@ -93,17 +93,7 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
     fn run(command: &str) -> i32 {
         let mut bits: VecDeque<_> = command.split(" ").collect();
         let program = bits.pop_front().expect("pop program");
-        let hash_dir = eval
-            .extra
-            .unwrap()
-            .downcast_ref::<Info>()
-            .unwrap()
-            .hash_dir
-            .to_str()
-            .unwrap()
-            .as_bytes()
-            .to_owned();
-        println!("hash_dir: {}", std::str::from_utf8(&hash_dir).unwrap());
+        println!("Running {}", command);
         let output = Command::new(program)
             .args(&bits)
             .env_clear()
@@ -136,6 +126,11 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
 
     fn mkdir(path: &str) -> NoneType {
         fs::create_dir(path).expect(&format!("Making directory {path}"));
+        Ok(NoneType)
+    }
+
+    fn make_executable(path: &str) -> NoneType {
+        fs::set_permissions(path, Permissions::from_mode(0o755))?;
         Ok(NoneType)
     }
 }
@@ -204,7 +199,6 @@ impl Builder {
         let mut eval: Evaluator = Evaluator::new(&module);
         let info = Info {
             http_client: Client::new(),
-            hash_dir: self.hash_dir.clone(),
         };
         eval.extra = Some(&info);
 
@@ -223,7 +217,7 @@ impl Builder {
         sb.add("paths", paths);
         let build_context = sb.build().alloc_value(heap);
 
-        unix_fs::chroot(&self.hash_dir).context("can't chroot")?;
+        unix_fs::chroot("./store/merged").context("can't chroot")?;
         env::set_current_dir("/")?;
         make_if_not_exists(&PathBuf::from("/output"))?;
         let res = eval.eval_function(build_fn, &[build_context], &[])?;
@@ -235,7 +229,7 @@ impl Builder {
         Ok(())
     }
 
-    pub fn build_module(self) -> Result<()> {
+    pub fn build_module(&self) -> Result<()> {
         let complete_file = self.hash_dir.join(".complete");
 
         if complete_file.exists() {
@@ -257,7 +251,6 @@ impl Builder {
         let mut eval: Evaluator = Evaluator::new(&module);
         let info = Info {
             http_client: Client::new(),
-            hash_dir: self.hash_dir.clone(),
         };
         eval.extra = Some(&info);
 
@@ -272,12 +265,49 @@ impl Builder {
             .get("dependencies")
             .unwrap_or_else(|| heap.alloc_list(&[]));
 
+        let mut dep_outputs = vec![];
         for dep in dependencies.iterate(heap).unwrap() {
             let dep_path = self
                 .module_dir
                 .join(format!("{}.star", dep.unpack_str().unwrap()));
             println!("Loading {:?}", dep_path);
-            Builder::new(dep_path.to_str().unwrap())?.build_module()?;
+            let builder = Builder::new(dep_path.to_str().unwrap())?;
+            builder.build_module()?;
+            dep_outputs.push(
+                builder
+                    .hash_dir
+                    .join("output")
+                    .canonicalize()?
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+
+        let mut mount_args = vec![
+            String::from("python"),
+            String::from("./helpers/mount-all.py"),
+            String::from("./store"),
+            self.hash_dir
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string(),
+        ];
+        mount_args.append(&mut dep_outputs);
+        let mount_output = Command::new("sudo")
+            .args(&mount_args)
+            .output()
+            .expect("mounting");
+
+        if mount_output.status.code() != Some(0) {
+            bail!(
+                "Failed to run {:?}: '{}' '{}'",
+                mount_args,
+                std::str::from_utf8(&mount_output.stdout).unwrap(),
+                std::str::from_utf8(&mount_output.stderr).unwrap()
+            );
         }
 
         let chroot_builder_path = "target/debug/build_in_chroot";
@@ -287,6 +317,20 @@ impl Builder {
             .env_clear()
             .output()
             .expect("launch build_in_chroot");
+
+        let unmount_output = Command::new("sudo")
+            .args(vec!["python", "./helpers/unmount-all.py", "./store"])
+            .output()
+            .expect("unmounting");
+
+        if unmount_output.status.code() != Some(0) {
+            bail!(
+                "Failed to run unmount: '{}' '{}'",
+                std::str::from_utf8(&unmount_output.stdout).unwrap(),
+                std::str::from_utf8(&unmount_output.stderr).unwrap()
+            );
+        }
+
         if output.status.code() != Some(0) {
             bail!(
                 "Failed to run {}: '{}' '{}'",
