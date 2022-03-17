@@ -107,6 +107,12 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
                 std::str::from_utf8(&output.stderr).unwrap()
             );
         }
+        println!(
+            "Ran {}: '{}' '{}'",
+            command,
+            std::str::from_utf8(&output.stdout).unwrap(),
+            std::str::from_utf8(&output.stderr).unwrap()
+        );
 
         Ok(0)
     }
@@ -185,6 +191,9 @@ impl Builder {
     }
 
     pub fn build_in_chroot(self) -> Result<()> {
+        unix_fs::chroot("./store/merged").context("can't chroot")?;
+        env::set_current_dir("/")?;
+
         let ast: AstModule =
             AstModule::parse(&self.filename, self.content.to_owned(), &Dialect::Extended)?;
 
@@ -217,8 +226,6 @@ impl Builder {
         sb.add("paths", paths);
         let build_context = sb.build().alloc_value(heap);
 
-        unix_fs::chroot("./store/merged").context("can't chroot")?;
-        env::set_current_dir("/")?;
         make_if_not_exists(&PathBuf::from("/output"))?;
         let res = eval.eval_function(build_fn, &[build_context], &[])?;
         if res.is_none() {
@@ -313,7 +320,8 @@ impl Builder {
 
         let chroot_builder_path = "target/debug/build_in_chroot";
 
-        let output = Command::new(chroot_builder_path)
+        let output = Command::new("sudo")
+            .arg(chroot_builder_path)
             .arg(&self.filename)
             .env_clear()
             .output()
