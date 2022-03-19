@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, ClientBuilder};
 use sha2::{Digest, Sha256};
 use starlark::collections::SmallMap;
 use starlark::environment::{Globals, GlobalsBuilder, Module};
@@ -191,9 +191,6 @@ impl Builder {
     }
 
     pub fn build_in_chroot(self) -> Result<()> {
-        unix_fs::chroot("./store/merged").context("can't chroot")?;
-        env::set_current_dir("/")?;
-
         let ast: AstModule =
             AstModule::parse(&self.filename, self.content.to_owned(), &Dialect::Extended)?;
 
@@ -207,7 +204,11 @@ impl Builder {
         // We create an evaluator, which controls how evaluation occurs.
         let mut eval: Evaluator = Evaluator::new(&module);
         let info = Info {
-            http_client: Client::new(),
+            http_client: ClientBuilder::new()
+                .connection_verbose(true)
+                .use_rustls_tls()
+                .trust_dns(true)
+                .build()?,
         };
         eval.extra = Some(&info);
 
@@ -225,6 +226,11 @@ impl Builder {
         let mut sb = StructBuilder::new(heap);
         sb.add("paths", paths);
         let build_context = sb.build().alloc_value(heap);
+
+        // Make sure we do this *after* making the HTTP client, or that'll break due to needing various files
+        // e.g. resolv.conf, NSS libs, etc
+        unix_fs::chroot("./store/merged").context("can't chroot")?;
+        env::set_current_dir("/")?;
 
         make_if_not_exists(&PathBuf::from("/output"))?;
         let res = eval.eval_function(build_fn, &[build_context], &[])?;
@@ -321,9 +327,12 @@ impl Builder {
         let chroot_builder_path = "target/debug/build_in_chroot";
 
         let output = Command::new("sudo")
+            //.arg("strace")
+            .arg("-E")
             .arg(chroot_builder_path)
             .arg(&self.filename)
             .env_clear()
+            //.env("RUST_LOG", "trace")
             .output()
             .expect("launch build_in_chroot");
 

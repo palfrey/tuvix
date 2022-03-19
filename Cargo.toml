@@ -8,8 +8,9 @@ starlark = "0.6.0"
 anyhow = "1"
 sha2 = "0.10"
 base16ct = {version ="0.1", features = ["alloc"]}
-reqwest = {version = "0.11", features=["blocking", "rustls-tls"]}
+reqwest = {version = "0.11", features=["blocking", "rustls-tls", "trust-dns"]}
 url = "2"
 gazebo = "^0.4" # for Starlark integration
 xz2 = "0.1"
 tar = "0.4"
+env_logger = "0.9"
