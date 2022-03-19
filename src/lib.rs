@@ -139,6 +139,11 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
         fs::set_permissions(path, Permissions::from_mode(0o755))?;
         Ok(NoneType)
     }
+
+    fn link(first: &str, second: &str) -> NoneType {
+        fs::hard_link(first, second)?;
+        Ok(NoneType)
+    }
 }
 
 fn hash_file(filename: &str) -> Result<(String, String)> {

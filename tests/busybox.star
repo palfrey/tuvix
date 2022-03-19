@@ -6,6 +6,8 @@ def build(context):
     output_folder = get_output()
     bin_folder = joinpath(output_folder, "bin")
     mkdir(bin_folder)
-    ls_path = joinpath(bin_folder, "ls")
-    move(path, ls_path)
-    make_executable(ls_path)
+    busybox_path = joinpath(bin_folder, "busybox")
+    move(path, busybox_path)
+    make_executable(busybox_path)
+    for executable in ["rm", "chmod", "ls", "expr", "cat", "sort"]:
+        link(busybox_path, joinpath(bin_folder, executable))
