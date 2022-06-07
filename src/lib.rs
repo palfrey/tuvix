@@ -39,7 +39,7 @@ fn check_hash_for_bytes(contents: &[u8], expected_hash: &str) -> Result<(), Stri
 
 #[starlark_module]
 fn starlark_helpers(builder: &mut GlobalsBuilder) {
-    fn download(url: &str, sha256_hash: &str) -> String {
+    fn download(url: &str, sha256_hash: &str) -> anyhow::Result<String> {
         let checked_url = url::Url::parse(url).expect(&format!("failure parsing '{}' as url", url));
         let fname = checked_url
             .path_segments()
@@ -66,7 +66,7 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
         Ok(fname.to_string())
     }
 
-    fn unpack(fname: &str) -> String {
+    fn unpack(fname: &str) -> anyhow::Result<String> {
         let path = Path::new(fname);
         let mut absolute_path = std::env::current_dir()?;
         absolute_path.push(path);
@@ -80,17 +80,17 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
         Ok(folder.to_str().unwrap().to_string())
     }
 
-    fn cwd() -> String {
+    fn cwd() -> anyhow::Result<String> {
         Ok(std::env::current_dir()?.to_str().unwrap().to_string())
     }
 
-    fn chdir(folder: &str) -> NoneType {
+    fn chdir(folder: &str) -> anyhow::Result<NoneType> {
         println!("CD to {folder}");
         env::set_current_dir(folder)?;
         Ok(NoneType)
     }
 
-    fn run(command: &str) -> i32 {
+    fn run(command: &str) -> anyhow::Result<i32> {
         let mut bits: VecDeque<_> = command.split(" ").collect();
         let program = bits.pop_front().expect("pop program");
         println!("Running {}", command);
@@ -117,30 +117,30 @@ fn starlark_helpers(builder: &mut GlobalsBuilder) {
         Ok(0)
     }
 
-    fn get_output() -> String {
+    fn get_output() -> anyhow::Result<String> {
         Ok("/output".to_string())
     }
 
-    fn joinpath(first: &str, second: &str) -> String {
+    fn joinpath(first: &str, second: &str) -> anyhow::Result<String> {
         Ok(Path::new(first).join(second).to_str().unwrap().to_string())
     }
 
-    fn r#move(source: &str, dest: &str) -> NoneType {
+    fn r#move(source: &str, dest: &str) -> anyhow::Result<NoneType> {
         fs::rename(source, dest).expect(&format!("Move {source} to {dest}"));
         Ok(NoneType)
     }
 
-    fn mkdir(path: &str) -> NoneType {
+    fn mkdir(path: &str) -> anyhow::Result<NoneType> {
         fs::create_dir(path).expect(&format!("Making directory {path}"));
         Ok(NoneType)
     }
 
-    fn make_executable(path: &str) -> NoneType {
+    fn make_executable(path: &str) -> anyhow::Result<NoneType> {
         fs::set_permissions(path, Permissions::from_mode(0o755))?;
         Ok(NoneType)
     }
 
-    fn link(first: &str, second: &str) -> NoneType {
+    fn link(first: &str, second: &str) -> anyhow::Result<NoneType> {
         fs::hard_link(first, second)?;
         Ok(NoneType)
     }
@@ -225,8 +225,8 @@ impl Builder {
 
         let heap = eval.heap();
 
-        let mut paths_map = SmallMap::new();
-        paths_map.insert_hashed(heap.alloc_str("ncurses").get_hashed()?, heap.alloc("foo"));
+        let paths_map = SmallMap::new();
+        // paths_map.insert_hashed(heap.alloc_str("ncurses").get_hashed(), heap.alloc("foo"));
         let paths = Dict::new(paths_map);
         let mut sb = StructBuilder::new(heap);
         sb.add("paths", paths);
